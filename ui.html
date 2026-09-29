@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced RAG System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        body { margin: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+        .citation { 
+            background: #e0e7ff; color: #3730a3; padding: 1px 6px; 
+            border-radius: 4px; font-size: 12px; font-weight: 600; 
+            cursor: pointer; margin: 0 2px;
+        }
+        .citation:hover { background: #c7d2fe; }
+        .graph-node { cursor: pointer; }
+        .graph-node:hover { opacity: 0.8; }
+        .typing-dot { animation: blink 1.4s infinite; }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%, 80%, 100% { opacity: 0; } 40% { opacity: 1; } }
+        .fade-in { animation: fadeIn 0.3s ease-in; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useEffect } = React;
+
+const API_URL = "http://localhost:8000";
+
+// ──────────────────────────────────────────
+// Main App
+// ──────────────────────────────────────────
+function App() {
+    const [messages, setMessages] = useState([]);
+    const [input, setInput] = useState("");
+    const [loading, setLoading] = useState(false);
+    const [mode, setMode] = useState("ask"); // "ask" or "search"
+    const [sidePanel, setSidePanel] = useState("sources"); // "sources" or "graph"
+    const [currentSources, setCurrentSources] = useState([]);
+    const [graphData, setGraphData] = useState(null);
+    const [serverStatus, setServerStatus] = useState(null);
+    const [graphSearch, setGraphSearch] = useState("");
+    const messagesEndRef = useRef(null);
+    const inputRef = useRef(null);
+
+    // Check server on load
+    useEffect(() => {
+        fetch(`${API_URL}/health`)
+            .then(r => r.json())
+            .then(data => setServerStatus(data))
+            .catch(() => setServerStatus({ status: "error" }));
+    }, []);
+
+    // Auto-scroll
+    useEffect(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages]);
+
+    const sendMessage = async () => {
+        if (!input.trim() || loading) return;
+        const question = input.trim();
+        setInput("");
+        setMessages(prev => [...prev, { role: "user", content: question }]);
+        setLoading(true);
+
+        try {
+            if (mode === "ask") {
+                const res = await fetch(`${API_URL}/ask`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ 
+                        question, 
+                        use_rewrite: true, 
+                        use_multi_query: false, 
+                        top_k: 5 
+                    }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setCurrentSources(data.sources || []);
+                    setMessages(prev => [...prev, {
+                        role: "assistant",
+                        content: data.answer,
+                        sources: data.sources,
+                        timings: data.timings,
+                        rewritten: data.rewritten_query,
+                        type: "answer",
+                    }]);
+                    // Auto-load graph for first entity
+                    if (data.sources?.length > 0) {
+                        loadGraphForQuery(question);
+                    }
+                } else {
+                    setMessages(prev => [...prev, {
+                        role: "assistant",
+                        content: data.detail || "Error getting answer",
+                        type: "error",
+                    }]);
+                }
+            } else {
+                // Search mode
+                const res = await fetch(`${API_URL}/search`, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ query: question, top_k: 5 }),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    setCurrentSources(data.results.map((r, i) => ({
+                        source_number: i + 1,
+                        file_name: r.file_name,
+                        text_preview: r.text.substring(0, 200) + "...",
+                        relevance_score: r.score,
+                        chunk_id: r.chunk_id,
+                        language: r.language,
+                    })));
+                    setMessages(prev => [...prev, {
+                        role: "assistant",
+                        content: `Found ${data.total_results} relevant chunks for "${question}"`,
+                        sources: data.results,
+                        type: "search",
+                    }]);
+                }
+            }
+        } catch (err) {
+            setMessages(prev => [...prev, {
+                role: "assistant",
+                content: "Cannot connect to server. Make sure the API is running (python api.py)",
+                type: "error",
+            }]);
+        }
+        setLoading(false);
+        inputRef.current?.focus();
+    };
+
+    const loadGraphForQuery = async (query) => {
+        try {
+            // Try to find an entity from the query
+            const words = ["Deep Learning", "Machine Learning", "Neural Network", 
+                          "Artificial Intelligence", "GAN", "CNN", "NLP"];
+            let entity = null;
+            const qLower = query.toLowerCase();
+            for (const w of words) {
+                if (qLower.includes(w.toLowerCase())) { entity = w; break; }
+            }
+            if (!entity) {
+                const searchRes = await fetch(`${API_URL}/graph/entities/search?q=${encodeURIComponent(query.split(" ")[0])}&limit=1`);
+                const searchData = await searchRes.json();
+                if (searchData.length > 0) entity = searchData[0].name;
+            }
+            if (entity) {
+                const res = await fetch(`${API_URL}/graph/${encodeURIComponent(entity)}?depth=1&top_k=8`);
+                if (res.ok) {
+                    const data = await res.json();
+                    setGraphData(data);
+                }
+            }
+        } catch (err) { console.log("Graph load error:", err); }
+    };
+
+    const searchGraph = async () => {
+        if (!graphSearch.trim()) return;
+        try {
+            const res = await fetch(`${API_URL}/graph/${encodeURIComponent(graphSearch)}?depth=1&top_k=10`);
+            if (res.ok) {
+                const data = await res.json();
+                setGraphData(data);
+            } else {
+                setGraphData({ entity: graphSearch, related: [], subgraph: { nodes: [], edges: [] } });
+            }
+        } catch (err) { console.log("Graph search error:", err); }
+    };
+
+    const handleKeyDown = (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    };
+
+    return (
+        <div className="h-screen flex flex-col bg-gray-50">
+            {/* Header */}
+            <header className="bg-white border-b px-6 py-3 flex items-center justify-between shadow-sm">
+                <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
+                        <span className="text-white font-bold text-sm">R</span>
+                    </div>
+                    <div>
+                        <h1 className="text-lg font-semibold text-gray-900">Advanced RAG System</h1>
+                        <p className="text-xs text-gray-500">Hybrid Search • Reranking • Citations • Graph RAG</p>
+                    </div>
+                </div>
+                <div className="flex items-center gap-4">
+                    {/* Mode toggle */}
+                    <div className="flex bg-gray-100 rounded-lg p-1">
+                        <button 
+                            onClick={() => setMode("ask")}
+                            className={`px-3 py-1 rounded-md text-sm font-medium transition-all ${
+                                mode === "ask" ? "bg-indigo-600 text-white shadow" : "text-gray-600 hover:text-gray-900"
+                            }`}>
+                            💬 Ask
+                        </button>
+                        <button 
+                            onClick={() => setMode("search")}
+                            className={`px-3 py-1 rounded-md text-sm font-medium transition-all ${
+                                mode === "search" ? "bg-indigo-600 text-white shadow" : "text-gray-600 hover:text-gray-900"
+                            }`}>
+                            🔍 Search
+                        </button>
+                    </div>
+                    {/* Server status */}
+                    <div className={`w-2 h-2 rounded-full ${
+                        serverStatus?.status === "ok" ? "bg-green-500" : "bg-red-500"
+                    }`} title={serverStatus?.status === "ok" ? "Server connected" : "Server offline"} />
+                </div>
+            </header>
+
+            {/* Main content */}
+            <div className="flex flex-1 overflow-hidden">
+                {/* Chat panel */}
+                <div className="flex-1 flex flex-col">
+                    {/* Messages */}
+                    <div className="flex-1 overflow-y-auto p-6 space-y-4">
+                        {messages.length === 0 && (
+                            <div className="text-center mt-20">
+                                <div className="text-5xl mb-4">🔍</div>
+                                <h2 className="text-xl font-semibold text-gray-700 mb-2">
+                                    {mode === "ask" ? "Ask a question" : "Search your documents"}
+                                </h2>
+                                <p className="text-gray-500 mb-6">
+                                    {mode === "ask" 
+                                        ? "Get answers with citations from your document corpus" 
+                                        : "Find relevant chunks using hybrid search"}
+                                </p>
+                                <div className="flex flex-wrap gap-2 justify-center">
+                                    {["What is deep learning?", "How is AI used in medicine?", 
+                                    "What is backpropagation?","Was ist die deutsche Automobilindustrie?"].map(q => (
+                                        <button key={q} onClick={() => { setInput(q); }}
+                                            className="px-3 py-2 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 hover:bg-indigo-50 hover:border-indigo-200 transition-all">
+                                            {q}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {messages.map((msg, i) => (
+                            <MessageBubble key={i} message={msg} onSourceClick={(idx) => {
+                                setSidePanel("sources");
+                            }} />
+                        ))}
+
+                        {loading && (
+                            <div className="flex gap-2 items-center text-gray-500 fade-in">
+                                <div className="bg-white rounded-xl px-4 py-3 shadow-sm border">
+                                    <div className="flex gap-1">
+                                        <div className="typing-dot w-2 h-2 bg-indigo-400 rounded-full"></div>
+                                        <div className="typing-dot w-2 h-2 bg-indigo-400 rounded-full"></div>
+                                        <div className="typing-dot w-2 h-2 bg-indigo-400 rounded-full"></div>
+                                    </div>
+                                </div>
+                                <span className="text-sm">{mode === "ask" ? "Searching & generating answer..." : "Searching..."}</span>
+                            </div>
+                        )}
+                        <div ref={messagesEndRef} />
+                    </div>
+
+                    {/* Input */}
+                    <div className="p-4 border-t bg-white">
+                        <div className="flex gap-2 max-w-3xl mx-auto">
+                            <input
+                                ref={inputRef}
+                                value={input}
+                                onChange={(e) => setInput(e.target.value)}
+                                onKeyDown={handleKeyDown}
+                                placeholder={mode === "ask" ? "Ask a question about your documents..." : "Search for relevant chunks..."}
+                                className="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm"
+                                disabled={loading}
+                            />
+                            <button
+                                onClick={sendMessage}
+                                disabled={loading || !input.trim()}
+                                className="px-6 py-3 bg-indigo-600 text-white rounded-xl font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm">
+                                {loading ? "..." : "Send"}
+                            </button>
+                        </div>
+                        <p className="text-center text-xs text-gray-400 mt-2">
+                            {mode === "ask" ? "Uses Groq" : "No API quota used"}
+                        </p>
+                    </div>
+                </div>
+
+                {/* Side panel */}
+                <div className="w-96 border-l bg-white flex flex-col">
+                    {/* Tabs */}
+                    <div className="flex border-b">
+                        <button 
+                            onClick={() => setSidePanel("sources")}
+                            className={`flex-1 px-4 py-3 text-sm font-medium ${
+                                sidePanel === "sources" 
+                                    ? "text-indigo-600 border-b-2 border-indigo-600" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}>
+                            📄 Sources ({currentSources.length})
+                        </button>
+                        <button 
+                            onClick={() => setSidePanel("graph")}
+                            className={`flex-1 px-4 py-3 text-sm font-medium ${
+                                sidePanel === "graph" 
+                                    ? "text-indigo-600 border-b-2 border-indigo-600" 
+                                    : "text-gray-500 hover:text-gray-700"
+                            }`}>
+                            🕸️ Graph
+                        </button>
+                    </div>
+
+                    {/* Panel content */}
+                    <div className="flex-1 overflow-y-auto p-4">
+                        {sidePanel === "sources" ? (
+                            <SourcesPanel sources={currentSources} />
+                        ) : (
+                            <GraphPanel 
+                                graphData={graphData} 
+                                graphSearch={graphSearch}
+                                setGraphSearch={setGraphSearch}
+                                onSearch={searchGraph}
+                            />
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ──────────────────────────────────────────
+// Message Bubble
+// ──────────────────────────────────────────
+function MessageBubble({ message, onSourceClick }) {
+    if (message.role === "user") {
+        return (
+            <div className="flex justify-end fade-in">
+                <div className="bg-indigo-600 text-white px-4 py-3 rounded-2xl rounded-tr-md max-w-lg text-sm">
+                    {message.content}
+                </div>
+            </div>
+        );
+    }
+
+    const isError = message.type === "error";
+    
+    return (
+        <div className="flex justify-start fade-in">
+            <div className={`max-w-2xl ${isError ? "bg-red-50 border-red-200" : "bg-white"} border rounded-2xl rounded-tl-md px-5 py-4 shadow-sm`}>
+                {message.rewritten && (
+                    <div className="text-xs text-gray-400 mb-2">
+                        Rewritten: <span className="italic">{message.rewritten}</span>
+                    </div>
+                )}
+                <div className={`text-sm leading-relaxed ${isError ? "text-red-600" : "text-gray-800"}`}
+                     dangerouslySetInnerHTML={{ 
+                         __html: formatAnswer(message.content) 
+                     }} />
+                {message.timings && (
+                    <div className="mt-3 pt-2 border-t border-gray-100 flex gap-4 text-xs text-gray-400">
+                        <span>Search: {message.timings.search}s</span>
+                        <span>Rerank: {message.timings.rerank}s</span>
+                        <span>Answer: {message.timings.answer}s</span>
+                        <span className="font-medium text-gray-500">Total: {message.timings.total}s</span>
+                    </div>
+                )}
+                {message.type === "search" && message.sources && (
+                    <div className="mt-3 space-y-2">
+                        {message.sources.map((s, i) => (
+                            <div key={i} className="bg-gray-50 rounded-lg p-3 text-xs">
+                                <div className="flex justify-between items-center mb-1">
+                                    <span className="font-medium text-gray-700">{s.file_name}</span>
+                                    <span className="text-indigo-600 font-mono">Score: {s.score?.toFixed(4)}</span>
+                                </div>
+                                <p className="text-gray-600 line-clamp-2">{s.text?.substring(0, 150)}...</p>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+function formatAnswer(text) {
+    if (!text) return "";
+    return text.replace(/\[(\d+)\]/g, '<span class="citation">[$1]</span>');
+}
+
+// ──────────────────────────────────────────
+// Sources Panel
+// ──────────────────────────────────────────
+function SourcesPanel({ sources }) {
+    if (sources.length === 0) {
+        return (
+            <div className="text-center text-gray-400 mt-10">
+                <div className="text-3xl mb-2">📄</div>
+                <p className="text-sm">Sources will appear here after you ask a question</p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-3">
+            {sources.map((src, i) => (
+                <div key={i} className="bg-gray-50 rounded-lg p-3 border border-gray-100 hover:border-indigo-200 transition-all">
+                    <div className="flex items-center gap-2 mb-2">
+                        <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-xs font-bold">
+                            [{src.source_number || i + 1}]
+                        </span>
+                        <span className="text-sm font-medium text-gray-700 truncate">{src.file_name}</span>
+                    </div>
+                    {src.language && (
+                        <span className="inline-block bg-gray-200 text-gray-600 px-2 py-0.5 rounded text-xs mb-2">
+                            {src.language}
+                        </span>
+                    )}
+                    <p className="text-xs text-gray-600 leading-relaxed">
+                        {src.text_preview || src.text?.substring(0, 200) + "..."}
+                    </p>
+                    <div className="mt-2 text-xs text-gray-400">
+                        Score: {src.relevance_score?.toFixed(4) || src.score?.toFixed(4)}
+                        {src.chunk_id && <span className="ml-2">Chunk: {src.chunk_id}</span>}
+                    </div>
+                </div>
+            ))}
+        </div>
+    );
+}
+
+// ──────────────────────────────────────────
+// Graph Panel
+// ──────────────────────────────────────────
+function GraphPanel({ graphData, graphSearch, setGraphSearch, onSearch }) {
+    return (
+        <div>
+            {/* Search */}
+            <div className="flex gap-2 mb-4">
+                <input
+                    value={graphSearch}
+                    onChange={(e) => setGraphSearch(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && onSearch()}
+                    placeholder="Search entity..."
+                    className="flex-1 px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button onClick={onSearch}
+                    className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-sm hover:bg-indigo-700">
+                    Go
+                </button>
+            </div>
+
+            {!graphData ? (
+                <div className="text-center text-gray-400 mt-10">
+                    <div className="text-3xl mb-2">🕸️</div>
+                    <p className="text-sm">Search for an entity to see its connections</p>
+                    <div className="flex flex-wrap gap-1 mt-4 justify-center">
+                        {["Deep Learning", "Machine Learning", "GAN", "Neural Networks", "Germany"].map(e => (
+                            <button key={e} onClick={() => { setGraphSearch(e); }}
+                                className="px-2 py-1 bg-gray-100 rounded text-xs text-gray-600 hover:bg-indigo-50 hover:text-indigo-600">
+                                {e}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            ) : (
+                <div>
+                    <h3 className="font-semibold text-gray-800 mb-3">
+                        {graphData.entity}
+                        <span className="text-xs text-gray-400 ml-2">
+                            ({graphData.related?.length || 0} connections)
+                        </span>
+                    </h3>
+
+                    {/* Visual graph */}
+                    {graphData.subgraph && graphData.subgraph.nodes.length > 0 && (
+                        <div className="mb-4">
+                            <MiniGraph subgraph={graphData.subgraph} center={graphData.entity} />
+                        </div>
+                    )}
+
+                    {/* Related entities list */}
+                    <div className="space-y-2">
+                        {graphData.related?.map((rel, i) => (
+                            <div key={i} 
+                                onClick={() => { setGraphSearch(rel.entity); }}
+                                className="flex items-center justify-between bg-gray-50 rounded-lg p-2 hover:bg-indigo-50 cursor-pointer transition-all">
+                                <div>
+                                    <span className="text-sm font-medium text-gray-700">{rel.entity}</span>
+                                    <span className={`ml-2 text-xs px-1.5 py-0.5 rounded ${
+                                        rel.type === "TECH" ? "bg-blue-100 text-blue-700" :
+                                        rel.type === "ORG" ? "bg-green-100 text-green-700" :
+                                        rel.type === "GPE" ? "bg-yellow-100 text-yellow-700" :
+                                        rel.type === "PERSON" ? "bg-purple-100 text-purple-700" :
+                                        "bg-gray-100 text-gray-600"
+                                    }`}>{rel.type}</span>
+                                </div>
+                                <span className="text-xs text-gray-400">{rel.weight} chunks</span>
+                            </div>
+                        ))}
+                        {graphData.related?.length === 0 && (
+                            <p className="text-sm text-gray-400 text-center py-4">
+                                Entity "{graphData.entity}" not found in the knowledge graph
+                            </p>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ──────────────────────────────────────────
+// Mini Graph Visualization (SVG)
+// ──────────────────────────────────────────
+function MiniGraph({ subgraph, center }) {
+    const width = 340;
+    const height = 240;
+    const cx = width / 2;
+    const cy = height / 2;
+
+    if (!subgraph.nodes || subgraph.nodes.length === 0) return null;
+
+    // Position nodes in a circle around center
+    const centerNode = subgraph.nodes.find(n => n.is_center) || subgraph.nodes[0];
+    const otherNodes = subgraph.nodes.filter(n => !n.is_center);
+    
+    const positions = {};
+    positions[centerNode.id] = { x: cx, y: cy };
+    
+    otherNodes.forEach((node, i) => {
+        const angle = (2 * Math.PI * i) / otherNodes.length - Math.PI / 2;
+        const radius = Math.min(width, height) * 0.38;
+        positions[node.id] = {
+            x: cx + radius * Math.cos(angle),
+            y: cy + radius * Math.sin(angle),
+        };
+    });
+
+    const typeColors = {
+        TECH: "#6366f1", ORG: "#10b981", GPE: "#f59e0b",
+        PERSON: "#a855f7", TOPIC: "#ec4899",
+    };
+
+    return (
+        <svg width="100%" viewBox={`0 0 ${width} ${height}`} className="bg-gray-50 rounded-lg">
+            {/* Edges */}
+            {subgraph.edges.map((edge, i) => {
+                const from = positions[edge.source];
+                const to = positions[edge.target];
+                if (!from || !to) return null;
+                return (
+                    <line key={i} x1={from.x} y1={from.y} x2={to.x} y2={to.y}
+                        stroke="#e2e8f0" strokeWidth={Math.min(edge.weight / 5 + 1, 4)} />
+                );
+            })}
+            
+            {/* Nodes */}
+            {subgraph.nodes.map((node, i) => {
+                const pos = positions[node.id];
+                if (!pos) return null;
+                const isCenter = node.is_center;
+                const color = typeColors[node.type] || "#94a3b8";
+                const r = isCenter ? 20 : 12;
+                
+                return (
+                    <g key={i} className="graph-node">
+                        <circle cx={pos.x} cy={pos.y} r={r} fill={color} opacity={0.9} />
+                        <text x={pos.x} y={pos.y + r + 12} textAnchor="middle" 
+                            fontSize={isCenter ? "10" : "8"} fill="#475569"
+                            fontWeight={isCenter ? "bold" : "normal"}>
+                            {node.id.length > 15 ? node.id.substring(0, 15) + "..." : node.id}
+                        </text>
+                    </g>
+                );
+            })}
+        </svg>
+    );
+}
+
+// ──────────────────────────────────────────
+// Render
+// ──────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
