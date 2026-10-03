@@ -1,25 +1,3 @@
-"""
-Tests for the Summarization Agent
-===================================
-
-Run:
-    python agents/test_summarization.py
-    # or
-    pytest agents/test_summarization.py -v
-
-Tests:
-  1. Agent creation and structure
-  2. Input validation (no chunks, no query, no API key)
-  3. Query-focused summarization with real LLM call
-  4. General summarization
-  5. Per-chunk summarization
-  6. Compression ratio check
-  7. Result structure validation
-
-Requirements:
-    pip install groq
-    Set GROQ_API_KEY environment variable
-"""
 
 import sys
 import os

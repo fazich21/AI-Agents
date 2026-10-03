@@ -1,49 +1,3 @@
-"""
-Summarization Agent — Condenses retrieved chunks for better answers.
-=====================================================================
-
-Purpose in the RAG pipeline:
-  After retrieval + reranking, you have 5-10 chunks of raw text.
-  These chunks often contain:
-    - Redundant information (same fact in multiple chunks)
-    - Irrelevant sentences (the chunk has extra context)
-    - Long passages when only 1-2 sentences matter
-
-  The Summarization Agent reads all chunks, understands the user's
-  question, and produces a FOCUSED summary that:
-    1. Keeps only information relevant to the question
-    2. Removes redundancy across chunks
-    3. Preserves key facts, numbers, dates, names
-    4. Stays faithful to the source (no hallucination)
-
-  This summary then goes to the Answer Generator instead of raw chunks,
-  resulting in:
-    - Better answers (less noise for the LLM to filter)
-    - Lower token usage (shorter context = cheaper API calls)
-    - Faster responses (less text to process)
-
-How it works:
-  1. Receives: list of chunk texts + user query
-  2. Builds a summarization prompt with the query as focus
-  3. Calls Groq LLM (same one used for answer generation)
-  4. Returns: condensed summary + metadata
-
-Usage:
-    from agents import SummarizationAgent
-
-    agent = SummarizationAgent()
-
-    result = agent.run(
-        chunks=["chunk1 text...", "chunk2 text..."],
-        query="What is the annual leave policy?",
-        max_summary_length=500,    # optional, default 500 words
-        mode="query_focused",       # or "general"
-    )
-
-    if result["success"]:
-        summary = result["summary"]
-        # Pass this summary to AnswerGenerator instead of raw chunks
-"""
 
 import os
 import time
@@ -51,57 +5,6 @@ from typing import Any, Optional
 
 from agents.base_agent import BaseAgent
 
-
-# ---------------------------------------------------------------------------
-# Summarization prompts
-# ---------------------------------------------------------------------------
-
-QUERY_FOCUSED_PROMPT = """You are a precise summarization agent in a RAG pipeline.
-
-USER QUESTION: {query}
-
-RETRIEVED DOCUMENTS:
-{chunks_text}
-
-TASK:
-Summarize the above documents with FOCUS on answering the user's question.
-
-Rules:
-1. Include ONLY information relevant to the question.
-2. Preserve exact numbers, dates, names, and specific details.
-3. Remove redundant information (if multiple chunks say the same thing, state it once).
-4. Do NOT add information that is not in the documents.
-5. Do NOT say "according to the documents" — just state the facts.
-6. Keep the summary under {max_length} words.
-7. If the documents don't contain relevant information, say "No relevant information found in the retrieved documents."
-
-FOCUSED SUMMARY:"""
-
-GENERAL_SUMMARY_PROMPT = """You are a precise summarization agent.
-
-DOCUMENTS:
-{chunks_text}
-
-TASK:
-Provide a comprehensive summary of all the documents above.
-
-Rules:
-1. Cover all key points from every document.
-2. Preserve exact numbers, dates, names, and specific details.
-3. Remove redundant information across documents.
-4. Organize the summary logically by topic.
-5. Do NOT add information that is not in the documents.
-6. Keep the summary under {max_length} words.
-
-SUMMARY:"""
-
-CHUNK_SUMMARY_PROMPT = """Summarize this single text passage in 2-3 sentences,
-preserving key facts, numbers, and names:
-
-TEXT:
-{chunk_text}
-
-SUMMARY:"""
 
 
 class SummarizationAgent(BaseAgent):
@@ -209,7 +112,7 @@ class SummarizationAgent(BaseAgent):
         """
         chunks = kwargs.get("chunks", [])
         query = kwargs.get("query", "")
-        mode = kwargs.get("mode", "query_focused")
+        mode = kwargs.get("mode", "query_focused") #Query summaization
         max_length = kwargs.get("max_summary_length", 500)
 
         # Validation
